@@ -57,6 +57,36 @@ impl Ducklake {
     }
 }
 
+impl Table {
+    /// Read aggregate file and row statistics for this table at the current snapshot.
+    pub async fn statistics(&self) -> DucklakeResult<TableStatistics> {
+        let snapshot = self.conn.snapshot(SnapshotAccess::Any).await?;
+        let mut stats = load_statistics(self.conn.pool(), &[self.id], snapshot.info().id).await?;
+        Ok(stats.remove(&self.id).unwrap_or_default())
+    }
+
+    /// Check whether a data file is registered in the current snapshot.
+    pub async fn contains_data_file(&self, path: &str) -> DucklakeResult<bool> {
+        use ducklake_data_file::Column as File;
+        let snapshot = self.conn.snapshot(SnapshotAccess::Any).await?;
+        let path: crate::io::DucklakePath = path.parse()?;
+        let query = Query::select()
+            .expr(Expr::col(Asterisk).count())
+            .from(ducklake_data_file::Table)
+            .and_where(File::TableId.col().eq(self.id))
+            .and_where(File::Path.col().eq(path.to_string()))
+            .and_where(File::PathIsRelative.col().eq(path.is_relative()))
+            .filter_for_snapshot(
+                File::BeginSnapshot.col(),
+                File::EndSnapshot.col(),
+                snapshot.info().id,
+            )
+            .to_owned();
+        let (count,): (i64,) = self.conn.pool().fetch_one(&query).await?;
+        Ok(count > 0)
+    }
+}
+
 // PostgreSQL SUM(bigint) produces NUMERIC; MySQL uses SIGNED for integer casts.
 fn sum_i64(pool: &db::Pool, expression: Expr) -> Expr {
     let cast = match pool.dialect() {

@@ -21,7 +21,7 @@ pub(crate) trait TryIntoRef<Ref, Container = Catalog> {
 }
 
 impl<Ref: Copy, Container> TryIntoRef<Ref, Container> for Ref {
-    type Error = !;
+    type Error = std::convert::Infallible;
 
     fn try_into_ref(self, _container: &Container) -> Result<Ref, Self::Error> {
         Ok(self)

@@ -4,6 +4,26 @@ import pytest
 import ducklake as dl
 
 
+def test_table_file_progress_uses_current_catalog_snapshot(ducklake: dl.Ducklake) -> None:
+    # Arrange
+    table = ducklake.create_table("file_progress", {"x": dl.Int64()})
+    table.write_data_files([
+        dl.WriteDataFile("first.parquet", statistics=dl.DataFileStatistics(5)),
+        dl.WriteDataFile("second.parquet", statistics=dl.DataFileStatistics(3)),
+        dl.WriteDataFile("s3://warehouse/source%20folder/third.parquet", statistics=dl.DataFileStatistics(2)),
+    ])
+
+    # Act
+    statistics = table.statistics()
+
+    # Assert
+    assert statistics.num_data_files == 3
+    assert statistics.num_rows == 10
+    assert table.contains_data_file("first.parquet")
+    assert table.contains_data_file("s3://warehouse/source%20folder/third.parquet")
+    assert not table.contains_data_file("missing.parquet")
+
+
 @pytest.mark.parametrize("second_file_size", [200, None])
 def test_statistics_file_totals(ducklake: dl.Ducklake, second_file_size: int | None) -> None:
     # Arrange

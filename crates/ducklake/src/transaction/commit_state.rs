@@ -43,7 +43,7 @@ impl<'a> CommitState<'a> {
     /// Obtain the ID for the schema with the provided name. If the schema does not yet
     /// exist, a new ID is generated from the catalog ID sequence.
     pub(crate) fn schema_id(&mut self, schema_ref: SchemaRef) -> i64 {
-        if let Some(id) = self.catalog.schema(schema_ref).into_ok().id() {
+        if let Some(id) = self.catalog.schema(schema_ref).unwrap().id() {
             return id;
         }
         let id = self.catalog_id();
@@ -55,7 +55,7 @@ impl<'a> CommitState<'a> {
     /// Obtain the ID for the table with the provided identifier. If the table does not yet
     /// exist, a new ID is generated from the catalog ID sequence.
     pub(crate) fn table_id(&mut self, table_ref: TableRef) -> i64 {
-        if let Some(id) = self.catalog.table(table_ref).into_ok().id() {
+        if let Some(id) = self.catalog.table(table_ref).unwrap().id() {
             return id;
         }
         let id = self.catalog_id();
@@ -67,7 +67,7 @@ impl<'a> CommitState<'a> {
     /// Obtain the ID for the view with the provided identifier. If the view does not yet
     /// exist, a new ID is generated from the catalog ID sequence.
     pub(crate) fn view_id(&mut self, view_ref: ViewRef) -> i64 {
-        if let Some(id) = self.catalog.view(view_ref).into_ok().id() {
+        if let Some(id) = self.catalog.view(view_ref).unwrap().id() {
             return id;
         }
         let id = self.catalog_id();
@@ -90,7 +90,7 @@ impl<'a> CommitState<'a> {
     /// Obtain the IDs for the column with the provided reference.
     pub(crate) fn column_id(&mut self, column_ref: ColumnRef) -> i64 {
         let Ok(table) = self.catalog.table(column_ref.table_ref);
-        table.column(column_ref).into_ok().id()
+        table.column(column_ref).unwrap().id()
     }
 
     /// Obtain the ID for a partition within the table with the provided ID. If the partition does
@@ -98,7 +98,7 @@ impl<'a> CommitState<'a> {
     /// partition has not been defined for the table (i.e. is neither existing nor pending nor
     /// deleted).
     pub(crate) fn partition_id(&mut self, table_ref: TableRef) -> i64 {
-        if let Some(id) = self.catalog.table(table_ref).into_ok().partition_id() {
+        if let Some(id) = self.catalog.table(table_ref).unwrap().partition_id() {
             return id;
         }
         let id = self.catalog_id();
@@ -161,7 +161,7 @@ impl<'a> CommitState<'a> {
     }
 
     pub(crate) fn table_schema(&self, table_ref: TableRef) -> crate::Schema {
-        self.catalog.table(table_ref).into_ok().schema()
+        self.catalog.table(table_ref).unwrap().schema()
     }
 
     fn catalog_id(&mut self) -> i64 {

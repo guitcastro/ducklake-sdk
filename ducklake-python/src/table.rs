@@ -204,6 +204,16 @@ impl PyTable {
         block_on(py, self.0.write_data_files_by_name(data_files)).map_err(error::into_pyerr)
     }
 
+    pub fn statistics(&self, py: Python) -> PyResult<Wrap<ducklake::TableStatistics>> {
+        block_on(py, self.0.statistics())
+            .map(Wrap)
+            .map_err(error::into_pyerr)
+    }
+
+    pub fn contains_data_file(&self, py: Python, path: &str) -> PyResult<bool> {
+        block_on(py, self.0.contains_data_file(path)).map_err(error::into_pyerr)
+    }
+
     pub fn write_inline_data(&mut self, py: Python, data: ArrowPyTable) -> PyResult<()> {
         let (batches, _) = data.into_inner();
         block_on(py, self.0.write_inline_data(batches)).map_err(error::into_pyerr)
