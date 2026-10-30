@@ -175,6 +175,23 @@ impl Table {
         tx.commit().await
     }
 
+    /// Register external Parquet files using column names rather than their field IDs.
+    ///
+    /// Column statistics are omitted because their physical field IDs may refer to different
+    /// columns in the target table. Ownership of registered files transfers to DuckLake.
+    /// The caller must ensure that file column types are compatible with the table schema and
+    /// add any desired columns to the table before registering a file. Partitioned tables are
+    /// not supported by this method.
+    pub async fn write_data_files_by_name(
+        &self,
+        data_files: Vec<crate::WriteDataFile>,
+    ) -> DucklakeResult<()> {
+        let mut tx = self.conn.transaction(None).await?;
+        let mut table = self.transaction_table(&mut tx)?;
+        table.write_data_files_by_name(data_files).await?;
+        tx.commit().await
+    }
+
     /// Write the provided record batches as inline data into the catalog.
     pub async fn write_inline_data(&self, data: Vec<RecordBatch>) -> DucklakeResult<()> {
         let mut tx = self.conn.transaction(None).await?;

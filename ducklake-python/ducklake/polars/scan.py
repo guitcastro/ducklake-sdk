@@ -116,6 +116,58 @@ def _scan_ducklake(
     include_file_paths: str | None,
     time_zone: str,
 ) -> pl.LazyFrame:
+    mapped = [file for file in scan_result.data_files if file.mapping_id is not None]
+    if mapped:
+        unmapped = [file for file in scan_result.data_files if file.mapping_id is None]
+        frames = [
+            _scan_ducklake(
+                table,
+                typedefs.ScanResult(unmapped, scan_result.inline_data),
+                schema,
+                include_file_paths=include_file_paths,
+                time_zone=time_zone,
+            )
+        ]
+        target_schema = pl.Schema(schema)
+        for data_file in mapped:
+            if any(entry["is_partition"] for entry in data_file.name_mapping):
+                raise NotImplementedError("Polars partitioned name mappings are not yet supported")
+            deletes = [file.path for file in data_file.delete_files]
+            if data_file.inline_deletes is not None:
+                delete_path = Path(tempfile.mkdtemp()) / "inline_deletes.parquet"
+                pl.DataFrame(
+                    {"file_path": data_file.path, "pos": data_file.inline_deletes}
+                ).write_parquet(delete_path)
+                deletes.append(str(delete_path))
+            source = pl.scan_parquet(
+                data_file.path,
+                glob=False,
+                hive_partitioning=False,
+                storage_options=table._storage_options.to_dict(),
+                _deletion_files=("iceberg", ({0: deletes} if deletes else {}, {})),
+            )
+            source_schema = source.collect_schema()
+            mapping = _resolve_name_mapping(data_file.name_mapping, source_schema)
+            projections = []
+            for column in schema.columns:
+                name = mapping.get(column.field_id)
+                if name is not None:
+                    expr = _reshape_existing(
+                        pl.col(name), column, target_schema[column.name], mapping
+                    )
+                else:
+                    expr = pl.lit(column.initial_default)
+                projections.append(expr.cast(target_schema[column.name]).alias(column.name))
+            frame = source.select(projections)
+            if include_file_paths is not None:
+                frame = frame.with_columns(pl.lit(data_file.path).alias(include_file_paths))
+            frame = frame.with_columns(
+                pl.col(name).cast(_convert_datetime_time_zone(dtype, time_zone))
+                for name, dtype in target_schema.items()
+            )
+            frames.append(frame)
+        return pl.concat(frames)
+
     frames: list[pl.LazyFrame] = []
     data_files = scan_result.data_files
     if data_files:
@@ -329,6 +381,46 @@ def _decryption_properties(key: str | None) -> pl.ParquetDecryptionProperties | 
     return pl.ParquetDecryptionProperties(footer_key=base64.b64decode(key, validate=True))
 
 
+def _resolve_name_mapping(entries: list[dict], source_schema: pl.Schema) -> dict[int, str]:
+    by_id = {entry["column_id"]: entry for entry in entries}
+    resolved: dict[int, tuple[str, pl.DataType] | None] = {}
+
+    def resolve(entry: dict) -> tuple[str, pl.DataType] | None:
+        key = entry["column_id"]
+        if key in resolved:
+            return resolved[key]
+        parent = entry["parent_column"]
+        if parent is None:
+            fields = dict(source_schema)
+        else:
+            previous = resolve(by_id[parent])
+            if previous is None:
+                resolved[key] = None
+                return None
+            dtype = previous[1]
+            if isinstance(dtype, pl.Struct):
+                fields = {field.name: field.dtype for field in dtype.fields}
+            elif isinstance(dtype, (pl.List, pl.Array)):
+                resolved[key] = (entry["source_name"], dtype.inner)
+                return resolved[key]
+            else:
+                raise ValueError("Nested name mapping does not match the Parquet schema")
+        names = {name.casefold(): name for name in fields}
+        if len(names) != len(fields):
+            raise ValueError("Parquet column names are ambiguous when matched case-insensitively")
+        source_name = entry["source_name"]
+        actual = names.get(source_name.casefold()) if source_name is not None else None
+        resolved[key] = (actual, fields[actual]) if actual is not None else None
+        return resolved[key]
+
+    mapping: dict[int, str] = {}
+    for entry in entries:
+        result = resolve(entry)
+        if result is not None and entry["target_field_id"] is not None:
+            mapping[entry["target_field_id"]] = result[0]
+    return mapping
+
+
 # ----------------------------------------------------------------------------------------------- #
 #                                              VIEWS                                              #
 # ----------------------------------------------------------------------------------------------- #
@@ -527,7 +619,11 @@ def _reshape_existing(
                         field.name
                     )
                 )
-        return pl.struct(rebuilt)
+        return (
+            pl.when(base.is_null())
+            .then(pl.lit(None, dtype=target_dtype))
+            .otherwise(pl.struct(rebuilt))
+        )
 
     if isinstance(column.data_type, typedefs.List):
         inner_target = cast(pl.List, target_dtype).inner

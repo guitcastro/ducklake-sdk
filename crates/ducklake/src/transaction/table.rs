@@ -288,12 +288,28 @@ impl<'tx, 'a> TransactionTable<'tx, 'a> {
         self.tx.write_table_data_files(&self.name, data_files).await
     }
 
+    /// Register external Parquet files using column names rather than their field IDs.
+    ///
+    /// Column statistics are omitted because their physical field IDs may refer to different
+    /// columns in the target table. Ownership of registered files transfers to DuckLake.
+    /// The caller must ensure that file column types are compatible with the table schema and
+    /// add any desired columns to the table before registering a file. Partitioned tables are
+    /// not supported by this method.
+    pub async fn write_data_files_by_name(
+        &mut self,
+        data_files: Vec<crate::WriteDataFile>,
+    ) -> DucklakeResult<()> {
+        self.tx
+            .write_table_data_files_by_name(&self.name, data_files)
+            .await
+    }
+
     pub(crate) async fn write_transfer_data_files(
         &mut self,
         data_files: Vec<super::TransferDataFile>,
     ) -> DucklakeResult<()> {
         self.tx
-            .write_table_transfer_data_files(&self.name, data_files)
+            .write_table_transfer_data_files(&self.name, data_files, false)
             .await
     }
 
@@ -350,6 +366,26 @@ impl<'a> Transaction<'a> {
         table_name: &TableName,
         data_files: Vec<crate::WriteDataFile>,
     ) -> DucklakeResult<()> {
+        self.write_table_files_with_mapping(table_name, data_files, false)
+            .await
+    }
+
+    #[visibility_if(feature = "python", pub)]
+    async fn write_table_data_files_by_name(
+        &mut self,
+        table_name: &TableName,
+        data_files: Vec<crate::WriteDataFile>,
+    ) -> DucklakeResult<()> {
+        self.write_table_files_with_mapping(table_name, data_files, true)
+            .await
+    }
+
+    async fn write_table_files_with_mapping(
+        &mut self,
+        table_name: &TableName,
+        data_files: Vec<crate::WriteDataFile>,
+        map_by_name: bool,
+    ) -> DucklakeResult<()> {
         self.write_table_transfer_data_files(
             table_name,
             data_files
@@ -359,8 +395,10 @@ impl<'a> Transaction<'a> {
                     partition_values: None,
                     delete_files: Vec::new(),
                     inline_deletes: Vec::new(),
+                    name_mapping: None,
                 })
                 .collect(),
+            map_by_name,
         )
         .await
     }
@@ -369,10 +407,16 @@ impl<'a> Transaction<'a> {
         &mut self,
         table_name: &TableName,
         data_files: Vec<super::TransferDataFile>,
+        map_by_name: bool,
     ) -> DucklakeResult<()> {
         let table = self.catalog().table(table_name)?;
         let base_path = table.data_path(&self.metadata.data_path());
         let table_info = table.info();
+        if map_by_name && table_info.partitioning.is_some() {
+            return Err(DucklakeError::InvalidPartitions(
+                "name mapping for partitioned tables is not yet supported".into(),
+            ));
+        }
         let schema_columns = table_info.schema.columns_by_id();
 
         let encrypted = self.metadata.encrypted();
@@ -422,8 +466,13 @@ impl<'a> Transaction<'a> {
             .into_iter()
             .zip(paths)
             .zip(statistics)
-            .map(|((data_file, path), stats)| {
+            .map(|((data_file, path), mut stats)| {
+                if map_by_name {
+                    stats.column_stats.clear();
+                }
                 let commit_data_file = CommitDataFile {
+                    map_by_name,
+                    name_mapping: data_file.name_mapping,
                     path,
                     encryption_key: data_file.data_file.encryption_key,
                     num_rows: stats.num_rows,

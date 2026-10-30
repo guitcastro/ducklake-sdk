@@ -145,6 +145,21 @@ class Table:
             [WriteDataFile(f) if isinstance(f, str) else f for f in files]
         )
 
+    def write_data_files_by_name(
+        self, files: str | WriteDataFile | Sequence[str | WriteDataFile]
+    ) -> None:
+        """Register external Parquet files by matching their columns to table columns by name.
+
+        The caller must ensure compatible column types and add desired columns to the table first.
+        Column statistics are omitted, ownership of the files transfers to DuckLake, and
+        partitioned tables are not supported.
+        """
+        if isinstance(files, (str, WriteDataFile)):
+            files = [files]
+        self._pytable.write_data_files_by_name(
+            [WriteDataFile(f) if isinstance(f, str) else f for f in files]
+        )
+
     def _get_write_info(self) -> tuple[TableMetadata, PyDataFilePathGenerator, bool, bool]:
         return self._pytable.get_write_info()
 

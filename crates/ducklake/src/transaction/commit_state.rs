@@ -156,6 +156,10 @@ impl<'a> CommitState<'a> {
         file_id
     }
 
+    pub(crate) fn mapping_id(&mut self) -> i64 {
+        self.catalog_id()
+    }
+
     pub(crate) fn table_schema(&self, table_ref: TableRef) -> crate::Schema {
         self.catalog.table(table_ref).into_ok().schema()
     }

@@ -273,6 +273,7 @@ impl Ducklake {
                         partition_values: None,
                     },
                     partition_values: metadata,
+                    name_mapping: data_file.mapping_id.map(|_| data_file.name_mapping),
                     delete_files,
                     inline_deletes: data_file
                         .inline_deletes

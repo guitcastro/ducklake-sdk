@@ -195,6 +195,15 @@ impl PyTable {
         block_on(py, self.0.write_data_files(data_files)).map_err(error::into_pyerr)
     }
 
+    pub fn write_data_files_by_name(
+        &mut self,
+        py: Python,
+        data_files: Vec<Wrap<ducklake::WriteDataFile>>,
+    ) -> PyResult<()> {
+        let data_files = data_files.into_iter().map(|df| df.0).collect();
+        block_on(py, self.0.write_data_files_by_name(data_files)).map_err(error::into_pyerr)
+    }
+
     pub fn write_inline_data(&mut self, py: Python, data: ArrowPyTable) -> PyResult<()> {
         let (batches, _) = data.into_inner();
         block_on(py, self.0.write_inline_data(batches)).map_err(error::into_pyerr)
