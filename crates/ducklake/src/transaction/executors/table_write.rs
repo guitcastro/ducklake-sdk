@@ -20,9 +20,51 @@ pub(crate) async fn write_table_data(
     let table_id = state.table_id(*table_ref);
 
     // Accumulate metadata by catalog relation across every table write in the commit.
+    let schema = state.table_schema(*table_ref);
     let files = &mut changes.files;
     let mut all_column_ids = HashSet::new();
     for data_file in data_files {
+        let mapping_id = if data_file.map_by_name || data_file.name_mapping.is_some() {
+            let id = state.mapping_id();
+            files.column_mappings.push(DucklakeColumnMapping {
+                mapping_id: id,
+                table_id,
+                r#type: Some("map_by_name".into()),
+            });
+            if let Some(existing) = &data_file.name_mapping {
+                for entry in existing {
+                    files.name_mappings.push(DucklakeNameMapping {
+                        mapping_id: id,
+                        column_id: entry.column_id,
+                        source_name: entry.source_name.clone(),
+                        target_field_id: entry.target_field_id,
+                        parent_column: entry.parent_column,
+                        is_partition: entry.is_partition,
+                    });
+                }
+            } else {
+                let mut next_column_id = 0i64;
+                for column in schema.columns.values() {
+                    let base = next_column_id;
+                    for flat in column.flatten() {
+                        let field_id =
+                            flat.column.field_id.expect("catalog column has a field ID");
+                        files.name_mappings.push(DucklakeNameMapping {
+                            mapping_id: id,
+                            column_id: next_column_id,
+                            source_name: Some(flat.column.name),
+                            target_field_id: Some(field_id),
+                            parent_column: flat.parent_index.map(|parent| base + parent as i64),
+                            is_partition: Some(false),
+                        });
+                        next_column_id += 1;
+                    }
+                }
+            }
+            Some(id)
+        } else {
+            None
+        };
         let file_id = state.file_id();
         let row_id_start = {
             let start = state.table_stats(table_id).await?.next_row_id();
@@ -47,7 +89,7 @@ pub(crate) async fn write_table_data(
                 .as_ref()
                 .map(|_| state.partition_id(*table_ref)),
             encryption_key: data_file.encryption_key.clone(),
-            mapping_id: None,
+            mapping_id,
             partial_max: None,
         };
         files.data_files.push(ducklake_data_file);

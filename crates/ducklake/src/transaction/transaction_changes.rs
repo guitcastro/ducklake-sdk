@@ -50,6 +50,8 @@ pub(super) struct TagChange {
 
 #[derive(Default)]
 pub(super) struct FileChanges {
+    pub column_mappings: Vec<DucklakeColumnMapping>,
+    pub name_mappings: Vec<DucklakeNameMapping>,
     pub data_files: Vec<DucklakeDataFile>,
     pub partition_values: Vec<DucklakeFilePartitionValue>,
     pub column_stats: Vec<DucklakeFileColumnStats>,
@@ -310,6 +312,8 @@ async fn persist_tags<K: Clone, E: InsertableEntity, C: IntoIden + Copy, const N
 }
 
 async fn persist_files(tx: &mut db::Transaction<'_>, files: FileChanges) -> DucklakeResult<()> {
+    tx.insert_entities(files.column_mappings).await?;
+    tx.insert_entities(files.name_mappings).await?;
     tx.insert_entities(files.data_files).await?;
     tx.insert_entities(files.partition_values).await?;
     tx.insert_entities(files.column_stats).await?;
