@@ -377,7 +377,7 @@ impl<'a> Transaction<'a> {
     #[visibility_if(feature = "python", pub)]
     async fn write_table_data_files_by_name(
         &mut self,
-        table_name: &TableName,
+        table_name: &QualifiedName,
         data_files: Vec<crate::WriteDataFile>,
     ) -> DucklakeResult<()> {
         self.write_table_files_with_mapping(table_name, data_files, true)
@@ -386,7 +386,7 @@ impl<'a> Transaction<'a> {
 
     async fn write_table_files_with_mapping(
         &mut self,
-        table_name: &TableName,
+        table_name: &QualifiedName,
         data_files: Vec<crate::WriteDataFile>,
         map_by_name: bool,
     ) -> DucklakeResult<()> {
