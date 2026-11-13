@@ -2,6 +2,26 @@ use sea_query::{Asterisk, Expr, ExprTrait, JoinType, Order, Query, SelectStateme
 
 use crate::spec::*;
 
+pub(super) fn build_name_mappings_query(table_id: i64) -> SelectStatement {
+    Query::select()
+        .column((ducklake_name_mapping::Table, Asterisk))
+        .from(ducklake_name_mapping::Table)
+        .join(
+            JoinType::InnerJoin,
+            ducklake_column_mapping::Table,
+            Expr::col((
+                ducklake_name_mapping::Table,
+                ducklake_name_mapping::Column::MappingId,
+            ))
+            .equals((
+                ducklake_column_mapping::Table,
+                ducklake_column_mapping::Column::MappingId,
+            )),
+        )
+        .and_where(ducklake_column_mapping::Column::TableId.col().eq(table_id))
+        .to_owned()
+}
+
 pub(super) fn build_data_files_query(table_id: i64, snapshot_id: i64) -> SelectStatement {
     Query::select()
         .column(Asterisk)

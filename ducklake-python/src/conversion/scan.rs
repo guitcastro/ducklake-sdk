@@ -61,8 +61,20 @@ impl<'py> IntoPyObject<'py> for Wrap<ScanDataFile> {
             .inline_deletes
             .as_ref()
             .map(|array| ArrowPyArray::from_array_ref(array.clone()));
+        let mut name_mapping = Vec::new();
+        for entry in self.0.name_mapping {
+            let item = PyDict::new(py);
+            item.set_item("column_id", entry.column_id)?;
+            item.set_item("source_name", entry.source_name)?;
+            item.set_item("target_field_id", entry.target_field_id)?;
+            item.set_item("parent_column", entry.parent_column)?;
+            item.set_item("is_partition", entry.is_partition)?;
+            name_mapping.push(item);
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item("encryption_key", self.0.encryption_key)?;
+        kwargs.set_item("mapping_id", self.0.mapping_id)?;
+        kwargs.set_item("name_mapping", name_mapping)?;
         cls.call(
             (self.0.path, statistics, delete_files, inline_deletes),
             Some(&kwargs),

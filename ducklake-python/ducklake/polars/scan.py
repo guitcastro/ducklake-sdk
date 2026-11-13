@@ -115,6 +115,58 @@ def _scan_ducklake(
     include_file_paths: str | None,
     time_zone: str,
 ) -> pl.LazyFrame:
+    mapped = [file for file in scan_result.data_files if file.mapping_id is not None]
+    if mapped:
+        unmapped = [file for file in scan_result.data_files if file.mapping_id is None]
+        frames = [
+            _scan_ducklake(
+                table,
+                typedefs.ScanResult(unmapped, scan_result.inline_data),
+                schema,
+                include_file_paths=include_file_paths,
+                time_zone=time_zone,
+            )
+        ]
+        target_schema = pl.Schema(schema)
+        for data_file in mapped:
+            if any(entry["is_partition"] for entry in data_file.name_mapping):
+                raise NotImplementedError("Polars partitioned name mappings are not yet supported")
+            deletes = [file.path for file in data_file.delete_files]
+            if data_file.inline_deletes is not None:
+                delete_path = Path(tempfile.mkdtemp()) / "inline_deletes.parquet"
+                pl.DataFrame(
+                    {"file_path": data_file.path, "pos": data_file.inline_deletes}
+                ).write_parquet(delete_path)
+                deletes.append(str(delete_path))
+            source = pl.scan_parquet(
+                data_file.path,
+                glob=False,
+                hive_partitioning=False,
+                storage_options=table._storage_options.to_dict(),
+                _deletion_files=("iceberg", ({0: deletes} if deletes else {}, {})),
+            )
+            source_schema = source.collect_schema()
+            mapping = _resolve_name_mapping(data_file.name_mapping, source_schema)
+            projections = []
+            for column in schema.columns:
+                name = mapping.get(column.field_id)
+                if name is not None:
+                    expr = _reshape_existing(
+                        pl.col(name), column, target_schema[column.name], mapping
+                    )
+                else:
+                    expr = pl.lit(column.initial_default)
+                projections.append(expr.cast(target_schema[column.name]).alias(column.name))
+            frame = source.select(projections)
+            if include_file_paths is not None:
+                frame = frame.with_columns(pl.lit(data_file.path).alias(include_file_paths))
+            frame = frame.with_columns(
+                pl.col(name).cast(_convert_datetime_time_zone(dtype, time_zone))
+                for name, dtype in target_schema.items()
+            )
+            frames.append(frame)
+        return pl.concat(frames)
+
     frames: list[pl.LazyFrame] = []
     data_files = scan_result.data_files
     if data_files:
@@ -315,6 +367,46 @@ def _decryption_properties(key: str | None) -> pl.ParquetDecryptionProperties | 
     return pl.ParquetDecryptionProperties(footer_key=base64.b64decode(key, validate=True))
 
 
+def _resolve_name_mapping(entries: list[dict], source_schema: pl.Schema) -> dict[int, str]:
+    by_id = {entry["column_id"]: entry for entry in entries}
+    resolved: dict[int, tuple[str, pl.DataType] | None] = {}
+
+    def resolve(entry: dict) -> tuple[str, pl.DataType] | None:
+        key = entry["column_id"]
+        if key in resolved:
+            return resolved[key]
+        parent = entry["parent_column"]
+        if parent is None:
+            fields = dict(source_schema)
+        else:
+            previous = resolve(by_id[parent])
+            if previous is None:
+                resolved[key] = None
+                return None
+            dtype = previous[1]
+            if isinstance(dtype, pl.Struct):
+                fields = {field.name: field.dtype for field in dtype.fields}
+            elif isinstance(dtype, (pl.List, pl.Array)):
+                resolved[key] = (entry["source_name"], dtype.inner)
+                return resolved[key]
+            else:
+                raise ValueError("Nested name mapping does not match the Parquet schema")
+        names = {name.casefold(): name for name in fields}
+        if len(names) != len(fields):
+            raise ValueError("Parquet column names are ambiguous when matched case-insensitively")
+        source_name = entry["source_name"]
+        actual = names.get(source_name.casefold()) if source_name is not None else None
+        resolved[key] = (actual, fields[actual]) if actual is not None else None
+        return resolved[key]
+
+    mapping: dict[int, str] = {}
+    for entry in entries:
+        result = resolve(entry)
+        if result is not None and entry["target_field_id"] is not None:
+            mapping[entry["target_field_id"]] = result[0]
+    return mapping
+
+
 # ----------------------------------------------------------------------------------------------- #
 #                                              VIEWS                                              #
 # ----------------------------------------------------------------------------------------------- #
@@ -449,3 +541,101 @@ def _convert_datetime_time_zone(
             return pl.List(_convert_datetime_time_zone(inner, time_zone))
         case _:
             return dtype
+
+
+def _align_schema(
+    lf: pl.LazyFrame,
+    ducklake_schema: Schema,
+    polars_schema: pl.Schema,
+    field_id_mapping: dict[int, str],
+) -> pl.LazyFrame:
+    projections = _derive_projections(ducklake_schema.columns, polars_schema, field_id_mapping)
+    return lf.select(projections)
+
+
+def _derive_projections(
+    columns: list[Column], target_schema: pl.Schema, field_id_mapping: dict[int, str]
+) -> list[pl.Expr]:
+    projections: list[pl.Expr] = []
+    for column in columns:
+        field_id = cast(int, column.field_id)
+        existing_column_name = field_id_mapping.get(field_id)
+        target_dtype = target_schema[column.name]
+        if existing_column_name is not None:
+            # "Existing column" -> reference it and reshape to match the target dtype,
+            # recursively descending into nested types (renames, inserted fields, etc.).
+            projection = _reshape_existing(
+                pl.col(existing_column_name), column, target_dtype, field_id_mapping
+            )
+        else:
+            # "Missing column" -> create new expression with (possibly nested) defaults.
+            projection = _new_column_expression(column, target_dtype)
+
+        # Select the expression and apply the alias to apply renames
+        projections.append(projection.alias(column.name))
+
+    return projections
+
+
+def _reshape_existing(
+    base: pl.Expr,
+    column: Column,
+    target_dtype: pl.DataType | pld.DataTypeClass,
+    field_id_mapping: dict[int, str],
+) -> pl.Expr:
+    """Reshape an expression for column so that it matches `target_dtype`.
+
+    This recursively handles nested renames and inserted fields for Struct/List types.
+    `base` may be any expression: `pl.col(name)` at the top level, `pl.element()` inside
+    a `list.eval`, or `<parent>.struct.field(name)` inside a struct.
+    """
+    if isinstance(column.data_type, typedefs.Struct):
+        struct_dtype = cast(pl.Struct, target_dtype)
+        target_fields = {field.name: field.dtype for field in struct_dtype.fields}
+        rebuilt: list[pl.Expr] = []
+        for field in column.data_type.fields:
+            sub_target = target_fields[field.name]
+            existing_name = field_id_mapping.get(cast(int, field.field_id))
+            if existing_name is None:
+                rebuilt.append(_new_column_expression(field, sub_target).alias(field.name))
+            else:
+                sub_base = base.struct.field(existing_name)
+                rebuilt.append(
+                    _reshape_existing(sub_base, field, sub_target, field_id_mapping).alias(
+                        field.name
+                    )
+                )
+        return (
+            pl.when(base.is_null())
+            .then(pl.lit(None, dtype=target_dtype))
+            .otherwise(pl.struct(rebuilt))
+        )
+
+    if isinstance(column.data_type, typedefs.List):
+        inner_target = cast(pl.List, target_dtype).inner
+        inner_column = column.data_type.inner
+        existing_name = field_id_mapping.get(cast(int, inner_column.field_id))
+        if existing_name is None:
+            # The inner element itself was replaced with a new field. Fall back to a
+            # default expression per element.
+            inner_expr = _new_column_expression(inner_column, inner_target)
+        else:
+            inner_expr = _reshape_existing(
+                pl.element(), inner_column, inner_target, field_id_mapping
+            )
+        return base.list.eval(inner_expr)
+
+    # Leaf scalar: nothing to reshape.
+    return base
+
+
+def _new_column_expression(column: Column, dtype: pl.DataType | pld.DataTypeClass) -> pl.Expr:
+    if column.initial_default is None:
+        return pl.lit(None, dtype=dtype).alias(column.name)
+
+    if isinstance(column.data_type, typedefs.Struct):
+        raise NotImplementedError("Initial defaults for struct columns are not supported")
+    if isinstance(column.data_type, typedefs.List):
+        raise NotImplementedError("Initial defaults for list columns are not supported")
+
+    return pl.lit(column.initial_default, dtype=dtype).alias(column.name)

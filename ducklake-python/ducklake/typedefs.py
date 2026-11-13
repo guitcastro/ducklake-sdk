@@ -714,12 +714,16 @@ class ScanDataFile:
         inline_deletes: ArrowArrayExportable | None,
         *,
         encryption_key: str | None = None,
+        mapping_id: int | None = None,
+        name_mapping: list[dict] | None = None,
     ) -> None:
         self.path = path
         self.encryption_key = encryption_key
         self.statistics = statistics
         self.delete_files = delete_files
         self.inline_deletes = inline_deletes
+        self.mapping_id = mapping_id
+        self.name_mapping = name_mapping or []
 
     def __repr__(self) -> str:
         return (

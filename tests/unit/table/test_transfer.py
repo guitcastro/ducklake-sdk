@@ -10,6 +10,37 @@ from polars.testing import assert_frame_equal
 import ducklake as dl
 import ducklake.exceptions as dlexc
 
+
+@pytest.mark.parametrize("operation", ["copy_tables", "move_tables"])
+def test_transfer_preserves_name_mappings(
+    ducklake: dl.Ducklake, transfer_target: dl.Ducklake, tmp_path: Path, operation: str
+) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    # Arrange
+    table = ducklake.create_table("mapped", {"name": dl.Varchar(), "city": dl.Varchar()})
+    schema = pa.schema(
+        [
+            pa.field("city", pa.string(), metadata={b"PARQUET:field_id": b"1"}),
+            pa.field("name", pa.string(), metadata={b"PARQUET:field_id": b"2"}),
+        ]
+    )
+    path = tmp_path / "mapped.parquet"
+    pq.write_table(
+        pa.Table.from_pydict({"city": ["Recife"], "name": ["Ana"]}, schema=schema), path
+    )
+    table.write_data_files_by_name([str(path)])
+
+    # Act
+    transferred = getattr(ducklake, operation)([table], transfer_target)[0]
+
+    # Assert
+    assert transferred._duckdb_connection.execute(
+        f"SELECT name, city FROM {transferred.name}"
+    ).fetchall() == [("Ana", "Recife")]
+
+
 pytestmark = pytest.mark.skip_config(
     catalog="mysql", reason="The DuckDB MySQL connector is unreliable."
 )

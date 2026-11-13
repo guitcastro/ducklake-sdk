@@ -243,6 +243,21 @@ impl PyTransactionTable {
             .map_err(error::into_pyerr)
     }
 
+    fn write_data_files_by_name(
+        &mut self,
+        py: Python,
+        data_files: Vec<Wrap<ducklake::WriteDataFile>>,
+    ) -> PyResult<()> {
+        let table = self.table.clone();
+        let data_files = data_files.into_iter().map(|df| df.0).collect();
+        let mut tx_guard = self.tx();
+        block_on(
+            py,
+            tx_guard.write_table_data_files_by_name(&table, data_files),
+        )
+        .map_err(error::into_pyerr)
+    }
+
     fn write_inline_data(&mut self, data: ArrowPyTable) -> PyResult<()> {
         let table = self.table.clone();
         let (batches, _) = data.into_inner();

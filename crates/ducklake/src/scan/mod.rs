@@ -133,6 +133,28 @@ async fn scan_table_inner(
         }
     )?;
 
+    let mapping_ids: Vec<_> = fetched_data_files
+        .iter()
+        .filter_map(|file| file.mapping_id)
+        .collect();
+    let mut name_mappings: HashMap<i64, Vec<crate::ScanNameMapping>> = HashMap::new();
+    if !mapping_ids.is_empty() {
+        let query = queries::build_name_mappings_query(table_id);
+        let entries: Vec<DucklakeNameMapping> = pool.fetch_all(&query).await?;
+        for entry in entries {
+            name_mappings
+                .entry(entry.mapping_id)
+                .or_default()
+                .push(crate::ScanNameMapping {
+                    column_id: entry.column_id,
+                    source_name: entry.source_name,
+                    target_field_id: entry.target_field_id,
+                    parent_column: entry.parent_column,
+                    is_partition: entry.is_partition,
+                });
+        }
+    }
+
     // Fetch all the inlined data tables. For this, we first need to get all relevant schemas
     // from the catalog.
     let snapshots =
@@ -199,6 +221,7 @@ async fn scan_table_inner(
     let mut file_partition_ids = Vec::with_capacity(fetched_data_files.len());
     for fetched_data_file in fetched_data_files {
         let file_id = fetched_data_file.data_file_id;
+        let mapping_id = fetched_data_file.mapping_id;
         file_partition_ids.push((file_id, fetched_data_file.partition_id));
 
         let encryption_key = fetched_data_file.encryption_key.clone();
@@ -220,6 +243,10 @@ async fn scan_table_inner(
             .unwrap_or_default();
 
         result.push(crate::ScanDataFile {
+            mapping_id,
+            name_mapping: mapping_id
+                .and_then(|id| name_mappings.get(&id).cloned())
+                .unwrap_or_default(),
             path: data_file,
             encryption_key,
             statistics,

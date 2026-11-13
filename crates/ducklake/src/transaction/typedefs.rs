@@ -5,6 +5,8 @@ use crate::{ArrayColumnStats, FileColumnStats, io};
 
 #[derive(Debug, Clone)]
 pub(super) struct CommitDataFile {
+    pub map_by_name: bool,
+    pub name_mapping: Option<Vec<crate::ScanNameMapping>>,
     pub path: io::DucklakePath,
     pub encryption_key: Option<String>,
     pub partition_values: Option<Vec<Option<String>>>,
@@ -30,6 +32,7 @@ pub(crate) struct TransferDataFile {
     pub partition_values: Option<Vec<Option<String>>>,
     pub delete_files: Vec<crate::ScanDeleteFile>,
     pub inline_deletes: Vec<i64>,
+    pub name_mapping: Option<Vec<crate::ScanNameMapping>>,
 }
 
 #[derive(Debug, Clone)]
