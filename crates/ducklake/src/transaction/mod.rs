@@ -9,7 +9,6 @@ mod typedefs;
 mod view;
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use changes::{AppliedChangeSet, Change, ChangeSet};
@@ -242,8 +241,14 @@ impl<'a> Transaction<'a> {
             );
 
             // Apply the changes from the transaction
-            let apply_result =
-                Self::apply_changes(&self.pool, &mut state, &change_set, &self.author_info).await;
+            let apply_result = Self::apply_changes(
+                &self.pool,
+                &mut state,
+                &change_set,
+                &self.author_info,
+                &self.metadata,
+            )
+            .await;
 
             // Handle any errors
             match apply_result {
@@ -303,31 +308,18 @@ impl<'a> Transaction<'a> {
         state: &mut CommitState<'_>,
         change_set: &ChangeSet,
         author_info: &AuthorInfo,
+        metadata: &Metadata,
     ) -> DucklakeResult<SnapshotInfo> {
         let mut changes = TransactionChanges::default();
 
         // First, we apply all the changes from the changeset
         change_set
-            .apply(&mut changes, state, pool.dialect())
+            .apply(&mut changes, state, pool.dialect(), metadata)
             .await?;
         let applied_changes = change_set.applied_change_set(state);
 
         // Then, we extract information from the applied changes to finalize the commit
-        let table_ids_with_inline_data_writes: HashSet<_> = change_set
-            .table_ids_with_inline_data_writes(state)
-            .into_iter()
-            .collect();
-        let created_table_ids: HashSet<_> =
-            change_set.created_table_ids(state).into_iter().collect();
         let table_ids_with_schema_changes = change_set.table_ids_with_schema_changes(state);
-
-        if table_ids_with_inline_data_writes.iter().any(|id| {
-            table_ids_with_schema_changes.contains(id) && !created_table_ids.contains(id)
-        }) {
-            unimplemented!(
-                "Cannot currently write inline data to a table that has schema changes within the same transaction"
-            );
-        }
 
         // Only at this point, we start the database transaction and persist changes
         let mut tx = pool.begin().await?;

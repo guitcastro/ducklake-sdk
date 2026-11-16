@@ -3,6 +3,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 import sqlalchemy as sa
+from polars.testing import assert_frame_equal
 
 import ducklake as dl
 
@@ -153,6 +154,33 @@ def existing_table(ducklake: dl.Ducklake, request: pytest.FixtureRequest) -> boo
     if request.param:
         ducklake.create_table("table", {"x": dl.Int64()})
     return request.param
+
+
+@pytest.mark.skip_config(catalog="mysql", reason="Data inlining is not yet supported for MySQL.")
+@pytest.mark.parametrize("write_first", [False, True])
+@pytest.mark.parametrize("limit", [0, 10])
+def test_inline_write_and_schema_change(
+    ducklake: dl.Ducklake, write_first: bool, limit: int
+) -> None:
+    # Arrange
+    ducklake.set_metadata(data_inlining_row_limit=limit)
+    ducklake.create_table("table", {"x": dl.Int32()})
+    data = pl.DataFrame({"x": [7]}, schema={"x": pl.Int32})
+
+    # Act
+    with ducklake.transaction() as tx:
+        table = tx.table("table")
+        if write_first:
+            table._write_inline_data(data)
+        table.rename_column("x", "y")
+        table.update_column_dtype("y", dl.Int64())
+        if not write_first:
+            table._write_inline_data(pl.DataFrame({"y": [7]}))
+
+    # Assert
+    table = ducklake.table("table")
+    assert not table.scan().data_files
+    assert_frame_equal(table.read_polars(), pl.DataFrame({"y": [7]}, schema={"y": pl.Int64}))
 
 
 @pytest.mark.skip_config(catalog="mysql", reason="Data inlining is not yet supported for MySQL.")
@@ -476,6 +504,85 @@ def test_postgres_copy_preserves_metadata(
     assert rows == [(value, value) for value in values]
 
 
+@pytest.mark.parametrize("scope", ["global", "schema", "table"])
+@pytest.mark.parametrize("limit", [0, 10])
+@pytest.mark.skip_config(catalog="mysql", reason="Data inlining is not yet supported for MySQL.")
+def test_eager_inline_tables_respect_metadata(
+    ducklake: dl.Ducklake, catalog_engine: sa.Engine, scope: str, limit: int
+) -> None:
+    # Arrange
+    inherited = 10 if limit == 0 else 0
+    ducklake.set_metadata(data_inlining_row_limit=inherited)
+    if scope == "global":
+        ducklake.set_metadata(data_inlining_row_limit=limit)
+    elif scope == "schema":
+        ducklake.set_metadata(data_inlining_row_limit=limit, schema="main")
+    table = ducklake.create_table("example", {"x": dl.Int64()})
+    initial = int((inherited if scope == "table" else limit) > 0)
+    if scope == "table":
+        table.set_metadata(data_inlining_row_limit=limit)
+
+    # Act
+    table.add_column(dl.Column("y", dl.Int64()))
+
+    # Assert
+    assert len(_inline_table_names(catalog_engine)) == initial + int(limit > 0)
+
+
+@pytest.mark.parametrize("reenable", [False, True])
+@pytest.mark.skip_config(catalog="mysql", reason="Data inlining is not yet supported for MySQL.")
+def test_inline_write_after_disabled_table_creation(
+    ducklake: dl.Ducklake, catalog_url: str, catalog_engine: sa.Engine, reenable: bool
+) -> None:
+    # Arrange
+    ducklake.set_metadata(data_inlining_row_limit=0)
+    table = ducklake.create_table("example", {"x": dl.Int64()})
+    data = pl.DataFrame({"x": [1, 2]})
+    if reenable:
+        ducklake.set_metadata(data_inlining_row_limit=10)
+
+    # Act
+    for _ in range(2):
+        if reenable:
+            table.write_polars(data)
+        else:
+            table._write_inline_data(data)
+    ducklake.set_metadata(data_inlining_row_limit=0)
+
+    # Assert
+    assert len(_inline_table_names(catalog_engine)) == 1
+    with dl.connect(catalog_url) as reopened:
+        assert sorted(reopened.table("example").scan_duckdb().fetchall()) == [
+            (1,),
+            (1,),
+            (2,),
+            (2,),
+        ]
+
+
+@pytest.mark.skip_config(catalog="mysql", reason="Data inlining is not yet supported for MySQL.")
+def test_inline_write_after_schema_changed_while_disabled(
+    ducklake: dl.Ducklake, catalog_url: str, catalog_engine: sa.Engine
+) -> None:
+    # Arrange
+    table = ducklake.create_table("example", {"x": dl.Int64()})
+    table._write_inline_data(pl.DataFrame({"x": [1]}))
+    original_names = _inline_table_names(catalog_engine)
+    ducklake.set_metadata(data_inlining_row_limit=0)
+    table.add_column(dl.Column("y", dl.Int64()))
+    ducklake.set_metadata(data_inlining_row_limit=10)
+
+    # Act
+    table._write_inline_data(pl.DataFrame({"x": [2], "y": [3]}))
+
+    # Assert
+    names = _inline_table_names(catalog_engine)
+    assert len(names) == 2
+    assert original_names < names
+    with dl.connect(catalog_url) as reopened:
+        assert sorted(reopened.table("example").scan_duckdb().fetchall()) == [(1, None), (2, 3)]
+
+
 # -------------------------------------------- UTILS -------------------------------------------- #
 
 
@@ -504,3 +611,17 @@ def _rename_tables(ducklake: dl.Ducklake, names: list[str], suffix: str) -> None
     with ducklake.transaction() as tx:
         for name in names:
             tx.table(name).rename(f"{name}{suffix}")
+
+
+def _inline_table_names(engine: sa.Engine) -> set[str]:
+    with engine.connect() as connection:
+        names = set(
+            connection.scalars(sa.text("SELECT table_name FROM ducklake_inlined_data_tables"))
+        )
+    physical = {
+        name
+        for name in sa.inspect(engine).get_table_names()
+        if name.startswith("ducklake_inlined_data_") and name != "ducklake_inlined_data_tables"
+    }
+    assert physical == names
+    return names

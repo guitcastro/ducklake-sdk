@@ -340,9 +340,30 @@ async fn persist_inline_data(
         return Ok(());
     }
 
-    let mut names = HashMap::new();
+    // Reuse storage for this schema version, or create it on the first inline write.
+    let keys: Vec<_> = tables
+        .keys()
+        .map(|id| [(*id).into(), schema_version.into()])
+        .collect();
+    let existing: Vec<DucklakeInlinedDataTables> = tx
+        .fetch_rows(
+            ducklake_inlined_data_tables::Table,
+            [
+                ducklake_inlined_data_tables::Column::TableId,
+                ducklake_inlined_data_tables::Column::SchemaVersion,
+            ],
+            &keys,
+        )
+        .await?;
+    let mut names: HashMap<_, _> = existing
+        .into_iter()
+        .map(|table| (table.table_id, table.table_name))
+        .collect();
     let mut registrations = Vec::new();
     for (table_id, schema) in tables {
+        if names.contains_key(&table_id) {
+            continue;
+        }
         let name = DucklakeInlinedData::table_name(table_id, schema_version);
         let dialect = tx.dialect();
         let mut query = Table::create();
@@ -366,30 +387,6 @@ async fn persist_inline_data(
     }
     tx.insert_entities(registrations).await?;
 
-    // Resolve existing inline tables together; new ones are already known in memory.
-    let existing: Vec<_> = data
-        .keys()
-        .filter(|id| !names.contains_key(id))
-        .map(|id| [(*id).into()])
-        .collect();
-    let tables: Vec<DucklakeInlinedDataTables> = tx
-        .fetch_rows(
-            ducklake_inlined_data_tables::Table,
-            [ducklake_inlined_data_tables::Column::TableId],
-            &existing,
-        )
-        .await?;
-    // Fetching by key does not guarantee ordering; select the latest registration per table.
-    let mut latest: HashMap<i64, DucklakeInlinedDataTables> = HashMap::new();
-    for table in tables {
-        if latest
-            .get(&table.table_id)
-            .is_none_or(|previous| table.schema_version > previous.schema_version)
-        {
-            latest.insert(table.table_id, table);
-        }
-    }
-    names.extend(latest.into_iter().map(|(id, table)| (id, table.table_name)));
     for (table_id, batches) in data {
         let name = names.get(&table_id).ok_or(sqlx::Error::RowNotFound)?;
         for batch in batches {
